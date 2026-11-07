@@ -1,0 +1,14 @@
+[package]
+name = "rust-hello-pebble"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+gravel-sys = { path = "../gravel/gravel-sys/" }
+gravel = { path = "../gravel/gravel/" }
+
+[patch.crates-io]
+gravel-sys = { path = "../gravel/gravel-sys/" }

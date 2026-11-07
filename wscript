@@ -1,0 +1,120 @@
+#!python (for filetype detection)
+
+import os.path
+import re
+from waflib.TaskGen import extension, feature, before_method
+
+top = "."
+out = "build"
+
+
+def concat_args(*args: list[str]) -> str:
+    return " ".join(args)
+
+
+@extension(".a")
+def add_artifact_file(self, node):
+    self.add_those_o_files(node)
+
+
+def options(ctx):
+    ctx.load("pebble_sdk")
+
+
+def configure(ctx):
+    ctx.load("pebble_sdk")
+
+    for platform in ctx.env.TARGET_PLATFORMS:
+        env = ctx.all_envs[platform]
+        env.LINKFLAGS += ["-z", "noexecstack"]
+        env.LINKFLAGS += ["-Wl,--no-warn-rwx-segments"]  # ¯\_(ツ)_/¯
+
+        env.RUST_CFG = [("device_name", env.PLATFORM_NAME)]
+
+        for tag in env.PLATFORM["TAGS"]:
+            match tag:
+                case "rect" | "round":
+                    env.RUST_CFG.append(("device_shape", tag))
+                case "bw" | "color":
+                    env.RUST_CFG.append(("device_gamut", tag))
+                case (
+                    "mic"
+                    | "strap"
+                    | "strappower"
+                    | "compass"
+                    | "health"
+                    | "touch"
+                    | "speaker"
+                ):
+                    env.RUST_CFG.append(("device_feature", tag))
+
+
+def build(ctx):
+    ctx.load("pebble_sdk")
+
+    binaries = []
+    base_env = ctx.env
+
+    for platform in ctx.env.TARGET_PLATFORMS:
+        ctx.env = ctx.all_envs[platform]
+        platform_name = ctx.env.PLATFORM_NAME
+        build_dir = ctx.env.BUILD_DIR
+        ctx.set_group(platform)
+
+        # TODO: This code shouldn't depend on project name.
+        # The name defined in package.json is pretty easy to access from this build script,
+        # but the name that Rust uses comes from Cargo.toml, and there's no guarantee they match.
+        rlib_name = "librust_hello_pebble.a"
+
+        codegen_flags = [
+            "relocation-model=pic",
+            # These flags are needed in order to remove
+            # unused references to the "abort" panic handler,
+            # which isn't usable in this environment.
+            "lto=thin",
+            "embed-bitcode=yes",
+        ]
+
+        rust_flags = []
+
+        for flag in codegen_flags:
+            rust_flags += ["-C", flag]
+
+        for cfg_item in ctx.env.RUST_CFG:
+            rust_flags.append("--cfg")
+            match cfg_item:
+                case (name, val):
+                    rust_flags.append(rf"{name}=\"{val}\"")
+                case name:
+                    rust_flags.append(name)
+
+        screen_size_args = (d for d in ctx.env.DEFINES if "PBL_DISPLAY_" in d)
+
+        rlib_task = ctx(
+            rule=concat_args(
+                "CARGO_ENCODED_RUSTFLAGS=" + "\x1f".join(rust_flags),
+                *screen_size_args,
+                "cargo build",
+                # TODO: support dev builds with debuginfo and whatever pebble build --dev does
+                "--release",
+                "--target thumbv7m-none-eabi",
+                "--target-dir .",
+            ),
+            source=[
+                "./Cargo.toml",
+                *ctx.path.ant_glob("src/**.rs"),
+            ],
+            stderr=None,
+            target=f"thumbv7m-none-eabi/release/{rlib_name}",
+        )
+
+        elf_task = ctx.pbl_program(
+            features="fake_obj",
+            source=[rlib_task.target],
+            target=f"{build_dir}/pebble-app.elf",
+        )
+        binaries.append({"platform": platform, "app_elf": elf_task.target})
+
+    ctx.env = base_env
+    ctx.set_group("bundle")
+    ctx.pbl_bundle(binaries=binaries)
